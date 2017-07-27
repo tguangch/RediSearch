@@ -60,7 +60,7 @@ typedef void *(*TrieMapReplaceFunc)(void *oldval, void *newval);
 * node, and take care of freeing any unwanted pointers. The returned value
 * can be NULL and doesn't have to be either the old or new value.
  */
-int TrieMap_Add(TrieMap *t, char *str, tm_len_t len, void *value, TrieMapReplaceFunc cb);
+int TrieMap_Add(TrieMap *t, const char *str, tm_len_t len, void *value, TrieMapReplaceFunc cb);
 
 /* Find the entry with a given string and length, and return its value, even if
  * that was NULL.
@@ -69,12 +69,12 @@ int TrieMap_Add(TrieMap *t, char *str, tm_len_t len, void *value, TrieMapReplace
  * constant value TRIEMAP_NOTFOUND, so checking if the key exists is done by
  * comparing to it, becase NULL can be a valid result.
 */
-void *TrieMap_Find(TrieMap *t, char *str, tm_len_t len);
+void *TrieMap_Find(TrieMap *t, const char *str, tm_len_t len);
 
 /* Mark a node as deleted. It also optimizes the trie by merging nodes if
  * needed. If freeCB is given, it will be used to free the value of the deleted
  * node. If it doesn't, we simply call free() */
-int TrieMap_Delete(TrieMap *t, char *str, tm_len_t len, void (*freeCB)(void *));
+int TrieMap_Delete(TrieMap *t, const char *str, tm_len_t len, void (*freeCB)(void *));
 
 /* Free the trie's root and all its children recursively. If freeCB is given, we
  * call it to free individual payload values. If not, free() is used instead. */

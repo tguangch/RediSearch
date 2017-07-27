@@ -37,7 +37,7 @@ TrieMapNode *__trieMapNode_resizeChildren(TrieMapNode *n, int offset) {
 /* Create a new trie node. str is a string to be copied into the node,
  * starting from offset up until len. numChildren is the initial number of
  * allocated child nodes */
-TrieMapNode *__newTrieMapNode(char *str, tm_len_t offset, tm_len_t len, tm_len_t numChildren,
+TrieMapNode *__newTrieMapNode(const char *str, tm_len_t offset, tm_len_t len, tm_len_t numChildren,
                               void *value, int terminal) {
   tm_len_t nlen = len - offset;
   TrieMapNode *n = malloc(__trieMapNode_Sizeof(numChildren, nlen));
@@ -58,7 +58,7 @@ TrieMap *NewTrieMap() {
   return tm;
 }
 
-TrieMapNode *__trieMapNode_AddChild(TrieMapNode *n, char *str, tm_len_t offset, tm_len_t len,
+TrieMapNode *__trieMapNode_AddChild(TrieMapNode *n, const char *str, tm_len_t offset, tm_len_t len,
                                     void *value) {
   // make room for another child
   n = __trieMapNode_resizeChildren(n, 1);
@@ -95,7 +95,8 @@ TrieMapNode *__trieMapNode_Split(TrieMapNode *n, tm_len_t offset) {
   return n;
 }
 
-int TrieMapNode_Add(TrieMapNode **np, char *str, tm_len_t len, void *value, TrieMapReplaceFunc cb) {
+int TrieMapNode_Add(TrieMapNode **np, const char *str, tm_len_t len, void *value,
+                    TrieMapReplaceFunc cb) {
   TrieMapNode *n = *np;
 
   tm_len_t offset = 0;
@@ -168,7 +169,7 @@ int TrieMapNode_Add(TrieMapNode **np, char *str, tm_len_t len, void *value, Trie
   return 1;
 }
 
-int TrieMap_Add(TrieMap *t, char *str, tm_len_t len, void *value, TrieMapReplaceFunc cb) {
+int TrieMap_Add(TrieMap *t, const char *str, tm_len_t len, void *value, TrieMapReplaceFunc cb) {
   int rc = TrieMapNode_Add(&t->root, str, len, value, cb);
   t->cardinality += rc;
   return rc;
@@ -192,7 +193,7 @@ static inline void __trieNode_sortChildren(TrieMapNode *n) {
   }
 }
 
-void *TrieMapNode_Find(TrieMapNode *n, char *str, tm_len_t len) {
+void *TrieMapNode_Find(TrieMapNode *n, const char *str, tm_len_t len) {
   tm_len_t offset = 0;
   while (n && (offset < len || len == 0)) {
     tm_len_t localOffset = 0;
@@ -323,7 +324,7 @@ TrieMapNode *TrieMapNode_FindNode(TrieMapNode *n, char *str, tm_len_t len, tm_le
   return NULL;
 }
 
-void *TrieMap_Find(TrieMap *t, char *str, tm_len_t len) {
+void *TrieMap_Find(TrieMap *t, const char *str, tm_len_t len) {
   return TrieMapNode_Find(t->root, str, len);
 }
 
@@ -395,7 +396,7 @@ void __trieMapNode_optimizeChildren(TrieMapNode *n, void (*freeCB)(void *)) {
   }
 }
 
-int TrieMapNode_Delete(TrieMapNode *n, char *str, tm_len_t len, void (*freeCB)(void *)) {
+int TrieMapNode_Delete(TrieMapNode *n, const char *str, tm_len_t len, void (*freeCB)(void *)) {
   tm_len_t offset = 0;
   int stackCap = 8;
   TrieMapNode **stack = calloc(stackCap, sizeof(TrieMapNode *));
@@ -464,7 +465,7 @@ end:
   return rc;
 }
 
-int TrieMap_Delete(TrieMap *t, char *str, tm_len_t len, void (*freeCB)(void *)) {
+int TrieMap_Delete(TrieMap *t, const char *str, tm_len_t len, void (*freeCB)(void *)) {
   int rc = TrieMapNode_Delete(t->root, str, len, freeCB);
   t->cardinality -= rc;
   return rc;
