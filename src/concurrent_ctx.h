@@ -61,7 +61,7 @@ typedef struct {
  * The maximum number of threads performing indexing on documents. It's goot to
  * set this to approximately the number of CPUs running
  */
-#define CONCURRENT_INDEX_POOL_SIZE 8
+#define CONCURRENT_INDEX_POOL_SIZE 32
 
 /** The number of execution "ticks" per elapsed time check. This is intended to reduce the number of
  * calls to clock_gettime() */
