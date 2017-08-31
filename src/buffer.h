@@ -96,6 +96,41 @@ static inline size_t Buffer_Reserve(Buffer *buf, size_t n) {
   return 1;
 }
 
+/**
+ * 'Reserves' a certain amount of space in the buffer, and returns a pointer
+ * to the newly reserved memory
+ */
+static inline void *Buffer_AddToSize(Buffer *b, size_t addedSize) {
+  Buffer_Reserve(b, b->offset + addedSize);
+  void *ret = b->data + b->offset;
+  b->offset += addedSize;
+  return ret;
+}
+
+/** Add data to the buffer without a BufferWriter */
+static inline void Buffer_Append(Buffer *b, const void *data, size_t len) {
+  Buffer_Reserve(b, len);
+  memcpy(b->data + b->offset, data, len);
+  b->offset += len;
+}
+
+/**
+ * Sets the new size of the buffer, and sets the offset to 0
+ */
+static inline void Buffer_ReInit(Buffer *b, size_t newSize) {
+  if (!b->data) {
+    Buffer_Init(b, newSize);
+  } else {
+    Buffer_Reserve(b, newSize);
+  }
+
+  b->offset = 0;
+}
+
+#define BUFFER_GETSIZE_AS(b, T) ((b)->offset / sizeof(T))
+
+#define Buffer_GetData(b) (b)->data
+
 BufferWriter NewBufferWriter(Buffer *b);
 BufferReader NewBufferReader(Buffer *b);
 
