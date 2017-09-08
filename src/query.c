@@ -15,6 +15,7 @@
 #include "ext/default.h"
 #include "rmutil/sds.h"
 #include "concurrent_ctx.h"
+#include "fragmenter.h"
 
 #define MAX_PREFIX_EXPANSIONS 200
 
@@ -195,6 +196,24 @@ void Query_SetIdFilter(Query *q, IdFilter *f) {
   Query_SetFilterNode(q, NewIdFilterNode(f));
 }
 
+static int maybeAddSumTerm(Query *q, const InvertedIndex *idx, const RSToken *tn, int needsCopy) {
+  if (!Buffer_Capacity(&q->termsMeta)) {
+    return 0;
+  }
+  FragmentTerm *termInfo = Buffer_AddToSize(&q->termsMeta, sizeof(*termInfo));
+  termInfo->len = tn->len;
+  if (needsCopy) {
+    termInfo->tok = malloc(tn->len);
+    memcpy((void *)termInfo->tok, tn->str, termInfo->len);
+  } else {
+    termInfo->tok = tn->str;
+  }
+
+  // Calculate IDF
+  termInfo->score = CalculateIDF(q->docTable->size, idx->numDocs);
+  return 1;
+}
+
 IndexIterator *Query_EvalTokenNode(Query *q, QueryNode *qn) {
   if (qn->type != QN_TOKEN) {
     return NULL;
@@ -210,7 +229,7 @@ IndexIterator *Query_EvalTokenNode(Query *q, QueryNode *qn) {
   if (ir == NULL) {
     return NULL;
   }
-
+  maybeAddSumTerm(q, ir->idx, &qn->tn, 1);
   return NewReadIterator(ir);
 }
 
@@ -251,7 +270,9 @@ static IndexIterator *Query_EvalPrefixNode(Query *q, QueryNode *qn) {
     // Open an index reader
     IndexReader *ir =
         Redis_OpenReader(q->ctx, &tok, q->docTable, 0, q->fieldMask & qn->fieldMask, &q->conc);
-
+    if (ir && maybeAddSumTerm(q, ir->idx, &tok, 0)) {
+      tok.str = NULL;
+    }
     free(tok.str);
     if (!ir) continue;
 
@@ -453,7 +474,9 @@ Query *NewQueryFromRequest(RSSearchRequest *req) {
                req->slop, req->flags & Search_InOrder, req->scorer, req->payload, req->sortBy);
 
   q->docTable = &req->sctx->spec->docs;
-
+  if (req->fields.wantSummaries) {
+    Buffer_Init(&q->termsMeta, sizeof(FragmentTerm));
+  }
   return q;
 }
 
@@ -732,6 +755,9 @@ void Query_OnReopen(RedisModuleKey *k, void *privdata) {
   q->docTable = &sp->docs;
 }
 
+static void Query_NoteTerm(const RSIndexResult *res) {
+}
+
 QueryResult *Query_Execute(Query *query) {
 
   ConcurrentSearch_AddKey(&query->conc, query->ctx->key, REDISMODULE_READ, query->ctx->keyName,
@@ -920,7 +946,132 @@ void QueryResult_Free(QueryResult *q) {
   free(q);
 }
 
-int QueryResult_Serialize(QueryResult *r, RedisSearchCtx *sctx, RSSearchRequest *req) {
+static void sendSummarizedField(const Query *q, const RSSearchRequest *req, RedisModuleCtx *ctx,
+                                const ReturnedField *fieldInfo, const RedisModuleString *text) {
+  FragmentList frags;
+  const FragmentTerm *terms = (const FragmentTerm *)Buffer_GetData(&q->termsMeta);
+  size_t numTerms = BUFFER_GETSIZE_AS(&q->termsMeta, FragmentTerm);
+
+  // Dump the terms:
+  for (size_t ii = 0; ii < numTerms; ++ii) {
+    printf("Have term '%.*s'\n", (int)terms[ii].len, terms[ii].tok);
+  }
+
+  Stemmer *stemmer = NewStemmer(SnowballStemmer, q->language);
+  FragmentList_Init(&frags, terms, numTerms, stemmer, 8, 6);
+
+  // Start gathering the terms
+  HighlightTags tags = {.openTag = fieldInfo->openTag, .closeTag = fieldInfo->closeTag};
+  if (!tags.openTag) {
+    tags.openTag = "";
+  }
+  if (!tags.closeTag) {
+    tags.closeTag = "";
+  }
+
+  // First actually generate the fragments
+  const char *doc = RedisModule_StringPtrLen(text, NULL);
+  FragmentList_Fragmentize(&frags, doc);
+  if (stemmer) {
+    stemmer->Free(stemmer);
+  }
+
+  if (fieldInfo->mode == SummarizeMode_WholeField) {
+    // Simplest. Just send entire doc
+    char *hlDoc = FragmentList_HighlightWholeDocS(&frags, &tags);
+    RedisModule_ReplyWithStringBuffer(ctx, hlDoc, strlen(hlDoc));
+    free(hlDoc);
+    FragmentList_Free(&frags);
+    return;
+  }
+
+  Buffer *iovsBufs;
+  size_t numIovBufs;
+  size_t numFrags = FragmentList_GetNumFrags(&frags);
+  int order;
+  if (fieldInfo->mode == SummarizeMode_AllFragments) {
+    order = HIGHLIGHT_ORDER_POS;
+    numIovBufs = numFrags;
+  } else {
+    order = HIGHLIGHT_ORDER_SCOREPOS;
+    numIovBufs = 3 > numFrags ? numFrags : 3;
+  }
+  iovsBufs = calloc(numIovBufs, sizeof(*iovsBufs));
+
+  FragmentList_HighlightFragments(&frags, &tags, fieldInfo->contextLen, iovsBufs, numIovBufs,
+                                  order);
+
+  if (fieldInfo->mode == SummarizeMode_AllFragments) {
+    RedisModule_ReplyWithArray(ctx, numIovBufs);
+  }
+
+  Buffer bufTmp;
+  Buffer_Init(&bufTmp, 16);
+
+  for (size_t ii = 0; ii < numIovBufs; ++ii) {
+    Buffer *curIovs = iovsBufs + ii;
+    struct iovec *iovs = (struct iovec *)Buffer_GetData(curIovs);
+    size_t numIovs = BUFFER_GETSIZE_AS(curIovs, struct iovec);
+    for (size_t jj = 0; jj < numIovs; ++jj) {
+      Buffer_Append(&bufTmp, iovs[jj].iov_base, iovs[jj].iov_len);
+    }
+    if (fieldInfo->mode == SummarizeMode_AllFragments) {
+      RedisModule_ReplyWithStringBuffer(ctx, Buffer_GetData(&bufTmp), Buffer_Offset(&bufTmp));
+      Buffer_ReInit(&bufTmp, 16);
+    } else if (ii + 1 < numIovBufs) {
+      Buffer_Append(&bufTmp, " ... ", 5);
+    }
+  }
+
+  if (fieldInfo->mode == SummarizeMode_BestFragment) {
+    RedisModule_ReplyWithStringBuffer(ctx, Buffer_GetData(&bufTmp), Buffer_Offset(&bufTmp));
+  }
+
+  Buffer_Free(&bufTmp);
+  for (size_t ii = 0; ii < numIovBufs; ++ii) {
+    Buffer_Free(iovsBufs + ii);
+  }
+  free(iovsBufs);
+  FragmentList_Free(&frags);
+}
+
+static void sendFullFields(const Document *doc, RedisModuleCtx *ctx) {
+  RedisModule_ReplyWithArray(ctx, doc->numFields * 2);
+  for (size_t ii = 0; ii < doc->numFields; ++ii) {
+    RedisModule_ReplyWithStringBuffer(ctx, doc->fields[ii].name, strlen(doc->fields[ii].name));
+    if (doc->fields[ii].text) {
+      RedisModule_ReplyWithString(ctx, doc->fields[ii].text);
+    } else {
+      RedisModule_ReplyWithNull(ctx);
+    }
+  }
+}
+
+static void sendDocumentFields(Query *q, RSSearchRequest *req, RedisModuleCtx *ctx,
+                               const Document *doc) {
+
+  const FieldList *fields = &req->fields;
+  RedisModule_ReplyWithArray(ctx, fields->numFields * 2);
+  for (size_t ii = 0; ii < fields->numFields; ii++) {
+    size_t idx = fields->fields[ii].nameIndex;
+    const DocumentField *docField = doc->fields + idx;
+    const ReturnedField *field = fields->fields + ii;
+    RedisModule_ReplyWithStringBuffer(ctx, fields->rawFields[idx], strlen(fields->rawFields[idx]));
+
+    if (!docField->text) {
+      RedisModule_ReplyWithNull(ctx);
+      continue;
+    }
+
+    if (field->mode != SummarizeMode_None) {
+      sendSummarizedField(q, req, ctx, field, docField->text);
+    } else {
+      RedisModule_ReplyWithString(ctx, docField->text);
+    }
+  }
+}
+
+int QueryResult_Serialize(QueryResult *r, Query *q, RedisSearchCtx *sctx, RSSearchRequest *req) {
   RedisModuleCtx *ctx = sctx->redisCtx;
 
   if (r->errorString != NULL) {
@@ -931,7 +1082,15 @@ int QueryResult_Serialize(QueryResult *r, RedisSearchCtx *sctx, RSSearchRequest 
   RedisModule_ReplyWithLongLong(ctx, (long long)r->totalResults);
   size_t arrlen = 1;
 
-  const int withDocs = !(req->flags & Search_NoContent);
+  const int withDocs = (req->fields.numFields || (req->flags & Search_NoContent) == 0);
+
+  const char **fieldList = NULL;
+  size_t numFieldList = 0;
+
+  if (req->fields.numFields) {
+    fieldList = (const char **)req->fields.rawFields;
+    numFieldList = req->fields.numRawFields;
+  }
 
   for (size_t i = 0; i < r->numResults; ++i) {
 
@@ -943,7 +1102,7 @@ int QueryResult_Serialize(QueryResult *r, RedisSearchCtx *sctx, RSSearchRequest 
       // Current behavior skips entire result if document does not exist.
       // I'm unusre if that's intentional or an oversight.
       RedisModuleString *idstr = RedisModule_CreateString(ctx, result->id, strlen(result->id));
-      Redis_LoadDocumentEx(sctx, idstr, req->retfields, req->nretfields, &doc, &rkey);
+      Redis_LoadDocumentEx(sctx, idstr, fieldList, numFieldList, &doc, &rkey);
       RedisModule_FreeString(ctx, idstr);
     }
 
@@ -983,15 +1142,13 @@ int QueryResult_Serialize(QueryResult *r, RedisSearchCtx *sctx, RSSearchRequest 
 
     if (withDocs) {
       ++arrlen;
-      RedisModule_ReplyWithArray(ctx, doc.numFields * 2);
-      for (size_t j = 0; j < doc.numFields; ++j) {
-        RedisModule_ReplyWithStringBuffer(ctx, doc.fields[j].name, strlen(doc.fields[j].name));
-        if (doc.fields[j].text) {
-          RedisModule_ReplyWithString(ctx, doc.fields[j].text);
-        } else {
-          RedisModule_ReplyWithNull(ctx);
-        }
+
+      if (!req->fields.numFields) {
+        sendFullFields(&doc, ctx);
+      } else {
+        sendDocumentFields(q, req, ctx, &doc);
       }
+
       if (rkey) {
         RedisModule_CloseKey(rkey);
       }

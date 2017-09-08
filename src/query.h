@@ -71,6 +71,9 @@ typedef struct RSQuery {
   StopWordList *stopwords;
 
   RSPayload payload;
+
+  // List of terms searched for in the query. Used for highlighting.
+  Buffer termsMeta;
 } Query;
 
 /* Set the concurrent mode of the query. By default it's on, setting here to 0 will turn it off,
@@ -94,7 +97,7 @@ typedef struct queryResult {
 } QueryResult;
 
 /* Serialize a query result to the redis client. Returns REDISMODULE_OK/ERR */
-int QueryResult_Serialize(QueryResult *r, RedisSearchCtx *ctx, RSSearchRequest *req);
+int QueryResult_Serialize(QueryResult *r, Query *q, RedisSearchCtx *ctx, RSSearchRequest *req);
 
 /* Evaluate a query stage and prepare it for execution. As execution is lazy
 this doesn't
